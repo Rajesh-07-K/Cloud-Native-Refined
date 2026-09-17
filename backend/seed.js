@@ -9,9 +9,12 @@ const bcrypt = require('bcryptjs');
 const User = require('./models/User');
 const Document = require('./models/Document');
 const Notification = require('./models/Notification');
+const ApproverHierarchy = require('./models/ApproverHierarchy');
 const QRCode = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
+const path = require('path');
+const { chainAuditEntry } = require('./utils/auditHash');
 
 const MONGO_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/docflow';
 
@@ -21,6 +24,9 @@ const SEED_USERS = [
   { name: 'Dr. Priya Desai', email: 'mentor@college.edu', password: 'password123', role: 'mentor', department: 'Computer Science' },
   { name: 'Rahul Verma', email: 'student@college.edu', password: 'password123', role: 'student', department: 'Computer Science' },
   { name: 'Sunita Reddy', email: 'library@college.edu', password: 'password123', role: 'administration', department: 'Library' },
+  { name: 'Prof. Meena Iyer', email: 'it.hod@college.edu', password: 'password123', role: 'hod', department: 'Information Technology' },
+  { name: 'Dr. Anil Gupta', email: 'it.mentor@college.edu', password: 'password123', role: 'mentor', department: 'Information Technology' },
+  { name: 'Kavitha Nair', email: 'it.student@college.edu', password: 'password123', role: 'student', department: 'Information Technology' },
 ];
 
 const SAMPLE_DOCS = [
@@ -40,7 +46,7 @@ async function seed() {
     console.log('✅ Connected to MongoDB');
 
     // Clear existing data
-    await Promise.all([User.deleteMany({}), Document.deleteMany({}), Notification.deleteMany({})]);
+    await Promise.all([User.deleteMany({}), Document.deleteMany({}), Notification.deleteMany({}), ApproverHierarchy.deleteMany({})]);
     console.log('🗑️  Cleared existing data');
 
     // Create uploads sample dir
@@ -65,6 +71,32 @@ async function seed() {
     const manager = createdUsers.find(u => u.role === 'hod' && u.department === 'Computer Science');
     const staff = createdUsers.find(u => u.role === 'student' && u.department === 'Computer Science');
 
+    // Create ApproverHierarchy
+    const departments = [
+      'Computer Science', 'Information Technology', 'Electronics', 'Mechanical',
+      'Civil', 'Mathematics', 'Physics', 'Chemistry', 'Administration', 'Library'
+    ];
+
+    for (const dept of departments) {
+      // Find mentor for department
+      let deptMentor = createdUsers.find(u => u.role === 'mentor' && u.department === dept);
+      if (!deptMentor) deptMentor = admin; // Fallback
+
+      // Find HOD for department
+      let deptHod = createdUsers.find(u => u.role === 'hod' && u.department === dept);
+      if (!deptHod) deptHod = admin; // Fallback
+
+      await ApproverHierarchy.create({
+        department: dept,
+        chain: [
+          { role: 'mentor', fallbackUserId: deptMentor._id, maxHoldHours: 12 },
+          { role: 'hod', fallbackUserId: deptHod._id, maxHoldHours: 24 },
+          { role: 'administration', fallbackUserId: admin._id, maxHoldHours: 24 }
+        ]
+      });
+    }
+    console.log(`🏢 Created approver hierarchies for ${departments.length} departments`);
+
     // Create documents
     for (const docData of SAMPLE_DOCS) {
       const uniqueDocId = `DOC-${uuidv4().split('-')[0].toUpperCase()}-${Date.now()}`;
@@ -74,18 +106,17 @@ async function seed() {
       const qrData = JSON.stringify({ id: uniqueDocId, title: docData.title, url: `http://localhost:3000/documents/` });
       const qrCode = await QRCode.toDataURL(qrData);
 
-      const auditLog = [
-        { action: 'UPLOADED', performedBy: uploader._id, comment: 'Document uploaded', fromStatus: null, toStatus: 'pending', timestamp: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000) }
-      ];
+      const auditLog = [];
+      auditLog.push(chainAuditEntry(auditLog, { action: 'UPLOADED', performedBy: uploader._id, comment: 'Document uploaded', fromStatus: null, toStatus: 'pending', timestamp: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000) }));
 
       if (docData.status === 'approved') {
-        auditLog.push({ action: 'APPROVED', performedBy: manager._id, comment: 'Looks good, approved.', fromStatus: 'pending', toStatus: 'approved', timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) });
+        auditLog.push(chainAuditEntry(auditLog, { action: 'APPROVED', performedBy: manager._id, comment: 'Looks good, approved.', fromStatus: 'pending', toStatus: 'approved', timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) }));
       } else if (docData.status === 'rejected') {
-        auditLog.push({ action: 'REJECTED', performedBy: manager._id, comment: 'Missing required signatures.', fromStatus: 'pending', toStatus: 'rejected', timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) });
+        auditLog.push(chainAuditEntry(auditLog, { action: 'REJECTED', performedBy: manager._id, comment: 'Missing required signatures.', fromStatus: 'pending', toStatus: 'rejected', timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) }));
       } else if (docData.status === 'escalated') {
-        auditLog.push({ action: 'ESCALATED', performedBy: manager._id, comment: 'Needs admin attention.', fromStatus: 'pending', toStatus: 'escalated', timestamp: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) });
+        auditLog.push(chainAuditEntry(auditLog, { action: 'ESCALATED', performedBy: manager._id, comment: 'Needs admin attention.', fromStatus: 'pending', toStatus: 'escalated', timestamp: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) }));
       } else if (docData.status === 'under_review') {
-        auditLog.push({ action: 'APPROVED', performedBy: manager._id, comment: 'Step 1 approved, forwarding.', fromStatus: 'pending', toStatus: 'under_review', timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) });
+        auditLog.push(chainAuditEntry(auditLog, { action: 'APPROVED', performedBy: manager._id, comment: 'Step 1 approved, forwarding.', fromStatus: 'pending', toStatus: 'under_review', timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) }));
       }
 
       const doc = await Document.create({

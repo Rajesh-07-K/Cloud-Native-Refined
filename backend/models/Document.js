@@ -16,7 +16,15 @@ const auditLogSchema = new mongoose.Schema({
   timestamp: { type: Date, default: Date.now },
   fromStatus: String,
   toStatus: String,
-  metadata: { type: mongoose.Schema.Types.Mixed, default: {} }
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  hash: {
+    type: String,
+    default: ''
+  },
+  prevHash: {
+    type: String,
+    default: ''
+  }
 });
 
 const documentSchema = new mongoose.Schema({
@@ -92,6 +100,8 @@ const documentSchema = new mongoose.Schema({
   fileName: { type: String, default: 'Request Letter (No Attachment)' },
   fileSize: { type: Number, default: 0 },
   fileType: { type: String, default: '' },
+  approvedFileUrl: { type: String, default: '' },
+  approvedFileName: { type: String, default: '' },
   qrCode: { type: String, default: '' },
   deadline: { type: Date, default: null },
   approvedAt: { type: Date, default: null },
@@ -101,7 +111,21 @@ const documentSchema = new mongoose.Schema({
   totalWorkflowSteps: { type: Number, default: 1 },
   auditLog: [auditLogSchema],
   isConfidential: { type: Boolean, default: false },
-  version: { type: Number, default: 1 }
+  version: { type: Number, default: 1 },
+  aiClassification: {
+    documentType: String,
+    suggestedDepartment: String,
+    urgency: { type: String, enum: ['low','normal','high'] },
+    confidence: Number
+  },
+  aiExtractedMetadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  aiValidation: {
+    isValid: Boolean,
+    missingFields: [String],
+    missingSignature: Boolean,
+    issues: [String]
+  },
+  aiProcessedAt: Date
 }, { timestamps: true });
 
 // Text search index

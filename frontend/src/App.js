@@ -11,6 +11,8 @@ import DocumentDetail from './pages/DocumentDetail';
 import UploadDocument from './pages/UploadDocument';
 import AdminPanel from './pages/AdminPanel';
 import Notifications from './pages/Notifications';
+import TrackDocument from './pages/TrackDocument';
+import AskAI from './pages/AskAI';
 
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
@@ -105,14 +107,10 @@ const App = () => {
           </ProtectedRoute>
         } />
 
-        <Route path="/documents/:id" element={
-          <ProtectedRoute>
-            <AppLayout><DocumentDetail /></AppLayout>
-          </ProtectedRoute>
-        } />
+        <Route path="/track/:uniqueId" element={<TrackDocument />} />
 
         <Route path="/upload" element={
-          <ProtectedRoute allowedRoles={['hod', 'mentor', 'administration']}>
+          <ProtectedRoute allowedRoles={['student', 'mentor', 'hod', 'administration']}>
             <AppLayout><UploadDocument /></AppLayout>
           </ProtectedRoute>
         } />
@@ -120,6 +118,12 @@ const App = () => {
         <Route path="/notifications" element={
           <ProtectedRoute>
             <AppLayout><Notifications /></AppLayout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/ask-ai" element={
+          <ProtectedRoute>
+            <AppLayout><AskAI /></AppLayout>
           </ProtectedRoute>
         } />
 

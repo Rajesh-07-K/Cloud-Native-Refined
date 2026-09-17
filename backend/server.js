@@ -13,6 +13,9 @@ const workflowRoutes = require('./routes/workflows');
 const userRoutes = require('./routes/users');
 const adminRoutes = require('./routes/admin');
 const notificationRoutes = require('./routes/notifications');
+const queryRoutes = require('./routes/query');
+const { startSlaMonitor } = require('./jobs/slaMonitor');
+const setupSwagger = require('./config/swagger');
 
 const app = express();
 
@@ -39,13 +42,17 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Static files for uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// API Routes
+// Configure Swagger
+setupSwagger(app);
+
+// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/query', queryRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -72,6 +79,9 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 DocFlow API running on port ${PORT}`);
   console.log(`📦 Environment: ${process.env.NODE_ENV}`);
+  
+  // Start background jobs
+  startSlaMonitor();
 });
 
 module.exports = app;

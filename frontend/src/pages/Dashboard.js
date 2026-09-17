@@ -74,7 +74,7 @@ const Dashboard = () => {
       <div className="page-header">
         <div className="page-header-left">
           <h2 style={{ fontSize: '1.75rem' }}>
-            {getGreeting()}, <span style={{ background: 'var(--gradient-primary)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>{user?.name?.split(' ')[0]}</span> 👋
+            {getGreeting()}, <span style={{ background: 'var(--gradient-primary)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>{user?.name?.split(' ')[0]}</span> 
           </h2>
           <p>Here's what's happening with your documents today.</p>
         </div>

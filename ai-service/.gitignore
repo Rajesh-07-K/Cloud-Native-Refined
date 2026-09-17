@@ -1,0 +1,18 @@
+# ChromaDB persistent storage — do not commit
+chroma_db/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Environment
+.env
+
+# Temp uploads
+temp_uploads/
+
+# Virtual environment
+venv/
+.venv/

@@ -2,13 +2,14 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
-  LayoutDashboard, FileText, Upload, Bell, Shield, LogOut, Settings
+  LayoutDashboard, FileText, Upload, Bell, Shield, LogOut, Settings, MessageCircle
 } from 'lucide-react';
 
 const NAV_ITEMS = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', roles: ['administration', 'hod', 'mentor', 'student'] },
   { to: '/documents', icon: FileText, label: 'Documents', roles: ['administration', 'hod', 'mentor', 'student'] },
   { to: '/upload', icon: Upload, label: 'Upload Document', roles: ['hod', 'mentor', 'student'] },
+  { to: '/ask-ai', icon: MessageCircle, label: 'Ask AI', roles: ['administration', 'hod', 'mentor', 'student'] },
   { to: '/notifications', icon: Bell, label: 'Notifications', roles: ['administration', 'hod', 'mentor', 'student'] },
   { to: '/admin', icon: Shield, label: 'Admin Panel', roles: ['administration'] },
 ];

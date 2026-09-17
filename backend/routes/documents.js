@@ -7,6 +7,11 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const { protect, authorize } = require('../middleware/auth');
 const upload = require('../middleware/upload');
+const { routeDocument } = require('../services/routingService');
+const axios = require('axios');
+const FormData = require('form-data');
+const { escalateDocument } = require('../services/escalationService');
+const { chainAuditEntry, verifyAuditChain } = require('../utils/auditHash');
 
 const router = express.Router();
 
@@ -37,6 +42,38 @@ const getWorkflowSteps = (workflowType) => {
   return steps[workflowType] || 2;
 };
 
+/**
+ * @swagger
+ * /api/documents/upload:
+ *   post:
+ *     summary: Upload a new document
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - title
+ *               - department
+ *               - workflowType
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *               title:
+ *                 type: string
+ *               department:
+ *                 type: string
+ *               workflowType:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Document uploaded successfully
+ */
 // @route   POST /api/documents/upload
 // @desc    Upload a new document
 // @access  Private (Student, Mentor, HOD, Administration)
@@ -79,14 +116,13 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
     });
     doc.qrCode = await QRCode.toDataURL(qrData);
 
-    // Add initial audit log
-    doc.auditLog.push({
+    doc.auditLog.push(chainAuditEntry(doc.auditLog, {
       action: 'UPLOADED',
       performedBy: req.user._id,
       comment: 'Document uploaded and submitted for review',
       fromStatus: null,
       toStatus: 'pending'
-    });
+    }));
 
     await doc.save();
 
@@ -113,6 +149,81 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
       .populate('currentHolder', 'name email role');
 
     res.status(201).json({ success: true, message: 'Document uploaded successfully', document: populated });
+
+    // Fire-and-forget AI analysis
+    if (req.file) {
+      const formData = new FormData();
+      formData.append('document_id', doc._id.toString());
+      formData.append('file', fs.createReadStream(req.file.path));
+
+      const aiServiceUrl = `http://localhost:${process.env.AI_SERVICE_PORT || 8000}/intake/analyze`;
+      axios.post(aiServiceUrl, formData, {
+        headers: {
+          ...formData.getHeaders(),
+        },
+        timeout: 10000 // 10s timeout
+      }).then(async (response) => {
+        if (response.data && response.data.classification) {
+          const aiData = response.data;
+          // Do the AI update
+          await Document.findByIdAndUpdate(doc._id, {
+            aiClassification: aiData.classification,
+            aiExtractedMetadata: aiData.extracted_metadata || {},
+            aiValidation: aiData.validation || {},
+            aiProcessedAt: new Date()
+          });
+          
+          // Re-fetch document with AI fields
+          const updatedDoc = await Document.findById(doc._id);
+
+          // Perform intelligent routing
+          const routingDecision = await routeDocument(updatedDoc);
+          
+          if (routingDecision) {
+            updatedDoc.assignedTo = routingDecision.userId;
+            updatedDoc.auditLog.push(chainAuditEntry(updatedDoc.auditLog, {
+              action: 'REASSIGNED',
+              performedBy: doc.uploadedBy,
+              comment: routingDecision.reason,
+              fromStatus: updatedDoc.status,
+              toStatus: updatedDoc.status,
+              metadata: {
+                trigger: 'intelligent-routing',
+                assignedRole: routingDecision.role,
+                workload: routingDecision.workload
+              }
+            }));
+            await updatedDoc.save();
+            console.log(`[Routing] Document ${doc._id} assigned to user ${routingDecision.userId}`);
+          }
+
+          console.log(`[AI Service] Successfully analyzed document ${doc._id}`);
+
+          // Phase 3 — ChromaDB indexing (fire-and-forget, non-blocking)
+          try {
+            const aiServiceBase = `http://localhost:${process.env.AI_SERVICE_PORT || 8000}`;
+            const classification = aiData.classification || {};
+            await axios.post(`${aiServiceBase}/intake/index`, {
+              document_id: doc._id.toString(),
+              unique_id: updatedDoc.uniqueId || doc._id.toString(),
+              title: updatedDoc.title || '',
+              description: updatedDoc.description || '',
+              extracted_text: aiData.extracted_text || '',
+              document_type: classification.document_type || 'Unknown',
+              department: updatedDoc.department || '',
+              uploaded_by: updatedDoc.uploadedBy ? updatedDoc.uploadedBy.toString() : ''
+            }, { timeout: 8000 });
+            console.log(`[VectorStore] Indexed document ${doc._id} into ChromaDB`);
+          } catch (indexErr) {
+            // Never fail the upload — just log
+            console.warn(`[VectorStore] ChromaDB indexing failed for ${doc._id}: ${indexErr.message}`);
+          }
+        }
+      }).catch(err => {
+        console.warn(`[AI Service] Failed to analyze document ${doc._id}: ${err.message}`);
+      });
+    }
+
   } catch (error) {
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
@@ -180,13 +291,13 @@ router.get('/:id', protect, async (req, res) => {
     }
 
     // Add viewed log
-    doc.auditLog.push({
+    doc.auditLog.push(chainAuditEntry(doc.auditLog, {
       action: 'VIEWED',
       performedBy: req.user._id,
       comment: `Viewed by ${req.user.name}`,
       fromStatus: doc.status,
       toStatus: doc.status
-    });
+    }));
     await doc.save();
 
     res.json({ success: true, document: doc });
@@ -198,7 +309,7 @@ router.get('/:id', protect, async (req, res) => {
 // @route   POST /api/documents/:id/approve
 // @desc    Approve a document
 // @access  Private (Mentor, HOD, Administration)
-router.post('/:id/approve', protect, authorize('mentor', 'hod', 'administration'), async (req, res) => {
+router.post('/:id/approve', protect, authorize('mentor', 'hod', 'administration'), upload.single('file'), async (req, res) => {
   try {
     const { comment } = req.body;
     const doc = await Document.findById(req.params.id).populate('uploadedBy', 'name email');
@@ -218,13 +329,39 @@ router.post('/:id/approve', protect, authorize('mentor', 'hod', 'administration'
       doc.status = 'under_review';
     }
 
-    doc.auditLog.push({
+    if (req.file) {
+      doc.approvedFileUrl = `/uploads/${req.file.filename}`;
+      doc.approvedFileName = req.file.originalname;
+    }
+
+    doc.auditLog.push(chainAuditEntry(doc.auditLog, {
       action: 'APPROVED',
       performedBy: req.user._id,
       comment: comment || 'Approved',
       fromStatus: prevStatus,
       toStatus: doc.status
-    });
+    }));
+
+    if (doc.status !== 'approved') {
+      const routingDecision = await routeDocument(doc);
+      if (routingDecision) {
+        doc.assignedTo = routingDecision.userId;
+        doc.auditLog.push(chainAuditEntry(doc.auditLog, {
+          action: 'REASSIGNED',
+          performedBy: req.user._id,
+          comment: routingDecision.reason,
+          fromStatus: doc.status,
+          toStatus: doc.status,
+          metadata: {
+            trigger: 'intelligent-routing-advance',
+            assignedRole: routingDecision.role,
+            workload: routingDecision.workload
+          }
+        }));
+      }
+    } else {
+       doc.assignedTo = null; // No one holds it once approved
+    }
 
     await doc.save();
 
@@ -278,13 +415,13 @@ router.post('/:id/reject', protect, authorize('mentor', 'hod', 'administration')
     doc.rejectedAt = new Date();
     doc.rejectionReason = reason;
 
-    doc.auditLog.push({
+    doc.auditLog.push(chainAuditEntry(doc.auditLog, {
       action: 'REJECTED',
       performedBy: req.user._id,
       comment: comment || reason,
       fromStatus: prevStatus,
       toStatus: 'rejected'
-    });
+    }));
 
     await doc.save();
 
@@ -308,31 +445,11 @@ router.post('/:id/reject', protect, authorize('mentor', 'hod', 'administration')
 router.post('/:id/escalate', protect, authorize('mentor', 'hod', 'administration'), async (req, res) => {
   try {
     const { comment } = req.body;
-    const doc = await Document.findById(req.params.id).populate('uploadedBy', 'name email');
-    if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
-
-    const prevStatus = doc.status;
-    doc.status = 'escalated';
-
-    doc.auditLog.push({
-      action: 'ESCALATED',
-      performedBy: req.user._id,
-      comment: comment || 'Escalated for senior review',
-      fromStatus: prevStatus,
-      toStatus: 'escalated'
-    });
-
-    await doc.save();
-
-    // Notify administrations
-    const admins = await User.find({ role: 'administration', isActive: true });
-    for (const admin of admins) {
-      await createNotification(admin._id, 'escalated', 'Document Escalated', `"${doc.title}" has been escalated and requires administration attention.`, doc._id);
-    }
-
+    const doc = await escalateDocument(req.params.id, req.user._id, comment);
     res.json({ success: true, message: 'Document escalated', document: doc });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    const statusCode = error.message.includes('not found') ? 404 : 400;
+    res.status(statusCode).json({ success: false, message: error.message });
   }
 });
 
@@ -351,8 +468,8 @@ router.get('/:id/qr', protect, async (req, res) => {
 
 // @route   GET /api/documents/track/:uniqueId
 // @desc    Track document by unique ID (public QR scan)
-// @access  Private
-router.get('/track/:uniqueId', protect, async (req, res) => {
+// @access  Public
+router.get('/track/:uniqueId', async (req, res) => {
   try {
     const doc = await Document.findOne({ uniqueId: req.params.uniqueId })
       .populate('uploadedBy', 'name email department')
@@ -361,6 +478,71 @@ router.get('/track/:uniqueId', protect, async (req, res) => {
 
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found with that ID.' });
     res.json({ success: true, document: doc });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// @route   DELETE /api/documents/:id
+// @desc    Delete a document request
+// @access  Private (Mentor, HOD, Administration)
+router.delete('/:id', protect, authorize('mentor', 'hod', 'administration'), async (req, res) => {
+  try {
+    const doc = await Document.findById(req.params.id);
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Document not found.' });
+    }
+
+    // Optionally remove files
+    if (doc.fileUrl) {
+      const filePath = path.join(__dirname, '..', doc.fileUrl);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    if (doc.approvedFileUrl) {
+      const approvedFilePath = path.join(__dirname, '..', doc.approvedFileUrl);
+      if (fs.existsSync(approvedFilePath)) {
+        fs.unlinkSync(approvedFilePath);
+      }
+    }
+
+    await Document.findByIdAndDelete(req.params.id);
+    await Notification.deleteMany({ document: req.params.id });
+
+    res.json({ success: true, message: 'Document deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// @route   GET /api/documents/:id/audit/verify
+// @desc    Verify the cryptographic integrity of a document's audit log
+// @access  Private
+router.get('/:id/audit/verify', protect, async (req, res) => {
+  try {
+    const doc = await Document.findById(req.params.id);
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Document not found.' });
+    }
+
+    // Apply same RBAC access rules as getting a document
+    if (req.user.role === 'student' && doc.uploadedBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied to this document' });
+    }
+    if (req.user.role === 'mentor' || req.user.role === 'hod') {
+      const isDept = doc.department === req.user.department;
+      const isAssigned = doc.assignedTo?.toString() === req.user._id.toString();
+      const isHolder = doc.currentHolder?.toString() === req.user._id.toString();
+      
+      if (!isDept && !isAssigned && !isHolder) {
+        return res.status(403).json({ success: false, message: 'Access denied to this document' });
+      }
+    }
+
+    const verificationResult = verifyAuditChain(doc.auditLog);
+    res.json({ success: true, ...verificationResult });
+
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
